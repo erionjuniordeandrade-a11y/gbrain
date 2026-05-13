@@ -411,6 +411,153 @@ export async function doctorReportRemote(engine: BrainEngine): Promise<DoctorRep
 }
 
 /**
+ * v0.33.x: FS-only doctor check options. Shared between the local CLI
+ * `--fast` path and the HTTP MCP `run_doctor { mode: 'fast' }` op so a
+ * thin-client can probe brain-host filesystem state (resolver, conformance,
+ * migration ledger, upgrade trail) without waking the database.
+ */
+export interface FastChecksOptions {
+  /** Explicit skills dir; bypasses auto-detection. */
+  skillsDir?: string;
+  /** When true (default), auto-detect skills dir if `skillsDir` is undefined. Set false to test the "no skills dir" branch. */
+  autoDetect?: boolean;
+}
+
+/**
+ * Pure read-only filesystem checks: resolver_health, skill_conformance,
+ * minions_migration ledger, upgrade_errors trail. Never mutates state and
+ * never opens the database — safe to expose over HTTP MCP.
+ *
+ * Extracted from `runDoctor()` so the CLI fast path and the HTTP fast op
+ * share one code path. The CLI keeps its `--fix` side-effect upstream of
+ * this call.
+ */
+export function collectFastChecks(opts: FastChecksOptions = {}): Check[] {
+  const checks: Check[] = [];
+  const autoDetect = opts.autoDetect !== false;
+  const skillsDir = opts.skillsDir ?? (autoDetect ? autoDetectSkillsDirReadOnly().dir : undefined);
+
+  // 1. Resolver health
+  if (skillsDir) {
+    const report = checkResolvable(skillsDir);
+    if (report.errors.length === 0 && report.warnings.length === 0) {
+      checks.push({
+        name: 'resolver_health',
+        status: 'ok',
+        message: `${report.summary.total_skills} skills, all reachable`,
+      });
+    } else {
+      const status = report.errors.length > 0 ? ('fail' as const) : ('warn' as const);
+      const total = report.errors.length + report.warnings.length;
+      checks.push({
+        name: 'resolver_health',
+        status,
+        message: `${total} issue(s): ${report.errors.length} error(s), ${report.warnings.length} warning(s)`,
+        issues: [...report.errors, ...report.warnings].map(i => ({
+          type: i.type,
+          skill: i.skill,
+          action: i.action,
+          fix: i.fix,
+        })),
+      });
+    }
+  } else {
+    checks.push({ name: 'resolver_health', status: 'warn', message: 'Could not find skills directory' });
+  }
+
+  // 2. Skill conformance
+  if (skillsDir) {
+    checks.push(checkSkillConformance(skillsDir));
+  }
+
+  // 3. Minions migration ledger (half-installed + wedged detection).
+  // Forward-progress override matches the runDoctor() copy: a partial for
+  // vX.Y.Z is treated as stale if any version >= X.Y.Z later completed.
+  try {
+    const completed = loadCompletedMigrations();
+    const byVersion = new Map<string, { complete: boolean; partial: boolean }>();
+    for (const entry of completed) {
+      const seen = byVersion.get(entry.version) ?? { complete: false, partial: false };
+      if (entry.status === 'complete') seen.complete = true;
+      if (entry.status === 'partial') seen.partial = true;
+      byVersion.set(entry.version, seen);
+    }
+    const completedVersions = Array.from(byVersion.entries())
+      .filter(([, s]) => s.complete)
+      .map(([v]) => v);
+    const stuck = Array.from(byVersion.entries())
+      .filter(([v, s]) => {
+        if (!s.partial || s.complete) return false;
+        const supersededBy = completedVersions.find(cv => compareVersions(cv, v) >= 0);
+        return supersededBy === undefined;
+      })
+      .map(([v]) => v);
+    const wedged: string[] = [];
+    for (const v of stuck) {
+      const partialCount = completed.filter(e => e.version === v && e.status === 'partial').length;
+      if (partialCount >= 3) wedged.push(v);
+    }
+    if (wedged.length > 0) {
+      const cmd = wedged.map(v => `gbrain apply-migrations --force-retry ${v}`).join(' && ');
+      checks.push({
+        name: 'minions_migration',
+        status: 'fail',
+        message: `WEDGED MIGRATION(s): ${wedged.join(', ')} (>=3 consecutive partials). Run: ${cmd}`,
+      });
+    } else if (stuck.length > 0) {
+      checks.push({
+        name: 'minions_migration',
+        status: 'fail',
+        message: `MINIONS HALF-INSTALLED (partial migration: ${stuck.join(', ')}). Run: gbrain apply-migrations --yes`,
+      });
+    }
+  } catch {
+    // Best-effort — fresh install with no ledger is normal.
+  }
+
+  // 4. Upgrade-error trail. ~/.gbrain/upgrade-errors.jsonl is appended by
+  // `gbrain upgrade` when best-effort post-upgrade steps fail; surface the
+  // latest entry with the recovery hint so the half-upgraded state isn't
+  // silent.
+  try {
+    const home = process.env.HOME || '';
+    const errPath = join(home, '.gbrain', 'upgrade-errors.jsonl');
+    if (existsSync(errPath)) {
+      const lines = readFileSync(errPath, 'utf-8').split('\n').filter(l => l.trim());
+      if (lines.length > 0) {
+        const latest = JSON.parse(lines[lines.length - 1]) as {
+          ts: string;
+          phase: string;
+          from_version: string;
+          to_version: string;
+          hint: string;
+        };
+        const date = latest.ts.slice(0, 10);
+        checks.push({
+          name: 'upgrade_errors',
+          status: 'warn',
+          message: `Post-upgrade failure on ${date} (${latest.from_version} → ${latest.to_version}, phase: ${latest.phase}). Recovery: ${latest.hint}`,
+        });
+      }
+    }
+  } catch {
+    // Best-effort.
+  }
+
+  return checks;
+}
+
+/**
+ * DoctorReport-shaped wrapper around collectFastChecks for the HTTP
+ * `run_doctor { mode: 'fast' }` op. Async to match doctorReportRemote's
+ * signature; today no FS read is async, but the shape lets future checks
+ * (e.g. shasum verification) drop in without an API break.
+ */
+export async function doctorReportFast(opts: FastChecksOptions = {}): Promise<DoctorReport> {
+  return computeDoctorReport(collectFastChecks(opts));
+}
+
+/**
  * v0.31.12 — surface a warn when models.tier.subagent or models.default
  * resolves to a non-Anthropic provider. The subagent loop in
  * src/core/minions/handlers/subagent.ts uses Anthropic Messages API with
@@ -634,179 +781,35 @@ export async function runDoctor(engine: BrainEngine | null, args: string[], dbSo
 
   // --- Filesystem checks (always run, no DB needed) ---
 
-  // 1. Resolver health
-  // Use the same auto-detect as `check-resolvable` so doctor sees a
-  // workspace/skills dir reachable via $OPENCLAW_WORKSPACE or
-  // ~/.openclaw/workspace, not just a `skills/` walked up from cwd.
-  // Read-only variant adds the install-path fallback so a hosted-CLI install
-  // run from `~` (e.g., `bun install -g github:garrytan/gbrain && cd ~ &&
-  // gbrain doctor`) can still find the bundled skills/ dir without warning.
+  // 1-4. Filesystem checks. resolver_health + skill_conformance +
+  // minions_migration ledger + upgrade_errors trail live in
+  // `collectFastChecks()` so the CLI fast path and the HTTP MCP
+  // `run_doctor { mode: 'fast' }` op share one code path.
+  //
+  // The CLI keeps its `--fix` side-effect upstream of the collector so the
+  // post-fix scan reflects the new state. SAFETY GATE (v0.31.7 follow-up to
+  // D5): refuse --fix when the skills dir came from the install-path
+  // fallback — autoFixDryViolations writes to SKILL.md files; a user running
+  // `cd ~ && gbrain doctor --fix` without an explicit signal would have
+  // install_path resolve to the bundled gbrain repo and silently rewrite the
+  // install-tree skills. Codex caught this leak in the v0.31.7 ship review
+  // (D6 lock).
   const detected = autoDetectSkillsDirReadOnly();
   const skillsDir = detected.dir;
-  if (skillsDir) {
-
-    // --fix: run auto-repair BEFORE checkResolvable so the post-fix scan
-    // reflects the new state. Auto-fix only targets DRY violations today;
-    // other resolver issues are left to human repair.
-    //
-    // SAFETY GATE (v0.31.7 follow-up to D5): refuse --fix when the skills
-    // dir came from the install-path fallback. autoFixDryViolations writes
-    // to SKILL.md files; a user running `cd ~ && gbrain doctor --fix`
-    // without an explicit signal would have install_path resolve to the
-    // bundled gbrain repo and silently rewrite the install-tree skills.
-    // Codex caught this leak in the v0.31.7 ship review (D6 lock).
-    if (doFix) {
-      if (detected.source === 'install_path') {
-        process.stderr.write(
-          'gbrain doctor --fix refused: skills dir resolved via install-path fallback (read-only).\n' +
-          'The --fix flag writes to SKILL.md files; running it against the bundled install\n' +
-          'tree would silently mutate gbrain itself. Set $GBRAIN_SKILLS_DIR, $OPENCLAW_WORKSPACE,\n' +
-          'or pass --skills-dir <path> to point at the workspace you actually want to fix.\n',
-        );
-      } else {
-        autoFixReport = autoFixDryViolations(skillsDir, { dryRun });
-        printAutoFixReport(autoFixReport, dryRun, jsonOutput);
-      }
-    }
-
-    const report = checkResolvable(skillsDir);
-    if (report.errors.length === 0 && report.warnings.length === 0) {
-      checks.push({
-        name: 'resolver_health',
-        status: 'ok',
-        message: `${report.summary.total_skills} skills, all reachable`,
-      });
+  if (doFix && skillsDir) {
+    if (detected.source === 'install_path') {
+      process.stderr.write(
+        'gbrain doctor --fix refused: skills dir resolved via install-path fallback (read-only).\n' +
+        'The --fix flag writes to SKILL.md files; running it against the bundled install\n' +
+        'tree would silently mutate gbrain itself. Set $GBRAIN_SKILLS_DIR, $OPENCLAW_WORKSPACE,\n' +
+        'or pass --skills-dir <path> to point at the workspace you actually want to fix.\n',
+      );
     } else {
-      const status = report.errors.length > 0 ? 'fail' as const : 'warn' as const;
-      const total = report.errors.length + report.warnings.length;
-      const check: Check = {
-        name: 'resolver_health',
-        status,
-        message: `${total} issue(s): ${report.errors.length} error(s), ${report.warnings.length} warning(s)`,
-        issues: [...report.errors, ...report.warnings].map(i => ({
-          type: i.type,
-          skill: i.skill,
-          action: i.action,
-          fix: i.fix,
-        })),
-      };
-      checks.push(check);
+      autoFixReport = autoFixDryViolations(skillsDir, { dryRun });
+      printAutoFixReport(autoFixReport, dryRun, jsonOutput);
     }
-  } else {
-    checks.push({ name: 'resolver_health', status: 'warn', message: 'Could not find skills directory' });
   }
-
-  // 2. Skill conformance
-  if (skillsDir) {
-    const conformanceResult = checkSkillConformance(skillsDir);
-    checks.push(conformanceResult);
-  }
-
-  // 3. Half-migrated Minions detection (filesystem-only).
-  // If completed.jsonl has any status:"partial" entry with no later
-  // status:"complete" for the same version, the install is mid-migration.
-  // Typical cause: v0.11.0 stopgap wrote a partial record but nobody ran
-  // `gbrain apply-migrations --yes` afterward. This check fires on every
-  // `gbrain doctor` invocation so your OpenClaw's health skill catches it.
-  //
-  // Forward-progress override: a partial entry for vX.Y.Z is treated as
-  // stale (not stuck) if there is a `complete` entry for any vA.B.C >= vX.Y.Z
-  // anywhere in the file. The reasoning: if a newer migration successfully
-  // landed, the install moved past the older partial — the old record is
-  // historical noise from a stopgap that never finished cleanly, but the
-  // schema clearly advanced. Without this, every install that went through
-  // a v0.11.0 stopgap and then upgraded carries the "MINIONS HALF-INSTALLED"
-  // flag forever, even on installs that have been at v0.22+ for months.
-  try {
-    const completed = loadCompletedMigrations();
-    const byVersion = new Map<string, { complete: boolean; partial: boolean }>();
-    for (const entry of completed) {
-      const seen = byVersion.get(entry.version) ?? { complete: false, partial: false };
-      if (entry.status === 'complete') seen.complete = true;
-      if (entry.status === 'partial') seen.partial = true;
-      byVersion.set(entry.version, seen);
-    }
-    const completedVersions = Array.from(byVersion.entries())
-      .filter(([, s]) => s.complete)
-      .map(([v]) => v);
-    const stuck = Array.from(byVersion.entries())
-      .filter(([v, s]) => {
-        if (!s.partial || s.complete) return false;
-        // Forward-progress override: if any version >= v has completed, the
-        // partial is stale. compareVersions returns 1 when first arg is newer.
-        const supersededBy = completedVersions.find(cv => compareVersions(cv, v) >= 0);
-        return supersededBy === undefined;
-      })
-      .map(([v]) => v);
-
-    // v0.31.8 (D19): detect 3-consecutive-partials shape (the apply-migrations
-    // wedge condition). The `stuck` filter above already excludes
-    // forward-progress-superseded versions, so we only count actual unresolved
-    // partials per version. A version with >=3 trailing partials needs
-    // `gbrain apply-migrations --force-retry <v>` once before plain --yes
-    // will succeed (the 3-consecutive-partials guard in apply-migrations.ts
-    // is still active). Without this hint, operators wedged on v0.29.1 (and
-    // any future migration that hits the same guard) get "run --yes" advice
-    // that won't unstick them.
-    const wedged: string[] = [];
-    for (const v of stuck) {
-      const partialCount = completed.filter(
-        e => e.version === v && e.status === 'partial',
-      ).length;
-      if (partialCount >= 3) wedged.push(v);
-    }
-
-    if (wedged.length > 0) {
-      // The wedged set is a STRICT subset of the stuck set, so a wedged
-      // version is also stuck. Surface the force-retry hint instead of the
-      // generic --yes hint; chained with `&&` when multiple versions are
-      // wedged so the operator can copy-paste a single line.
-      const cmd = wedged.map(v => `gbrain apply-migrations --force-retry ${v}`).join(' && ');
-      checks.push({
-        name: 'minions_migration',
-        status: 'fail',
-        message: `WEDGED MIGRATION(s): ${wedged.join(', ')} (>=3 consecutive partials). Run: ${cmd}`,
-      });
-    } else if (stuck.length > 0) {
-      checks.push({
-        name: 'minions_migration',
-        status: 'fail',
-        message: `MINIONS HALF-INSTALLED (partial migration: ${stuck.join(', ')}). Run: gbrain apply-migrations --yes`,
-      });
-    }
-    // Note: the "no preferences.json but schema is v7+" case is detected
-    // in the DB section below (needs schema version).
-  } catch (e) {
-    // completed.jsonl read/parse failure is non-fatal — probably a fresh
-    // install with no record yet. Don't warn here; the DB check below
-    // handles the "schema v7+ but no prefs" case.
-  }
-
-  // 3b. Upgrade-error trail (v0.13+). `gbrain upgrade` silently swallows
-  // best-effort failures in `gbrain post-upgrade`; the failure record is
-  // appended to ~/.gbrain/upgrade-errors.jsonl so we can surface it here
-  // with a paste-ready recovery hint. Without this, users end up with
-  // half-upgraded brains and no signal.
-  try {
-    const home = process.env.HOME || '';
-    const errPath = join(home, '.gbrain', 'upgrade-errors.jsonl');
-    if (existsSync(errPath)) {
-      const lines = readFileSync(errPath, 'utf-8').split('\n').filter(l => l.trim());
-      if (lines.length > 0) {
-        const latest = JSON.parse(lines[lines.length - 1]) as {
-          ts: string; phase: string; from_version: string; to_version: string; hint: string;
-        };
-        const date = latest.ts.slice(0, 10);
-        checks.push({
-          name: 'upgrade_errors',
-          status: 'warn',
-          message: `Post-upgrade failure on ${date} (${latest.from_version} → ${latest.to_version}, phase: ${latest.phase}). Recovery: ${latest.hint}`,
-        });
-      }
-    }
-  } catch {
-    // Read/parse failure is itself best-effort; skip silently.
-  }
+  checks.push(...collectFastChecks({ skillsDir: skillsDir ?? undefined }));
 
   // 3b-bis. Supervisor health (filesystem-only: PID liveness + audit log).
   // Reads the default PID file (`~/.gbrain/supervisor.pid` unless the user

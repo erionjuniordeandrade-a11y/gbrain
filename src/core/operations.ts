@@ -1618,9 +1618,23 @@ const get_brain_identity: Operation = {
  */
 const run_doctor: Operation = {
   name: 'run_doctor',
-  description: 'Run brain health checks and return a structured DoctorReport (thin-client doctor surface).',
-  params: {},
-  handler: async (ctx) => {
+  description:
+    'Run brain health checks and return a structured DoctorReport. Default mode `deep` runs the full DB+FS check set (thin-client doctor surface). Mode `fast` runs FS-only checks (resolver_health, skill_conformance, minions_migration ledger, upgrade_errors trail) without touching the database — useful when the embedded DB is mid-recovery or you only want a cheap liveness probe.',
+  params: {
+    mode: {
+      type: 'string',
+      required: false,
+      enum: ['fast', 'deep'],
+      default: 'deep',
+      description: 'Check set to run. `fast` = FS-only, no DB roundtrip. `deep` = full check set (default).',
+    },
+  },
+  handler: async (ctx, p) => {
+    const mode = (p.mode as string | undefined) ?? 'deep';
+    if (mode === 'fast') {
+      const { doctorReportFast } = await import('../commands/doctor.ts');
+      return doctorReportFast();
+    }
     const { doctorReportRemote } = await import('../commands/doctor.ts');
     return doctorReportRemote(ctx.engine);
   },
