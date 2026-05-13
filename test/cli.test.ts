@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
@@ -16,6 +16,33 @@ function isolatedEnv(home: string): Record<string, string> {
   delete env.DATABASE_URL;
   env.GBRAIN_HOME = home;
   return env;
+}
+
+function withoutProviderKeys(env: Record<string, string>): Record<string, string> {
+  const copy = { ...env };
+  for (const key of [
+    'OPENAI_API_KEY',
+    'ANTHROPIC_API_KEY',
+    'GOOGLE_API_KEY',
+    'GOOGLE_GENERATIVE_AI_API_KEY',
+    'VOYAGE_API_KEY',
+    'GROQ_API_KEY',
+    'TOGETHER_API_KEY',
+    'DASHSCOPE_API_KEY',
+    'DEEPSEEK_API_KEY',
+    'AZURE_OPENAI_API_KEY',
+  ]) {
+    delete copy[key];
+  }
+  return copy;
+}
+
+function seedLocalPgliteConfig(home: string): void {
+  mkdirSync(join(home, '.gbrain'), { recursive: true });
+  writeFileSync(join(home, '.gbrain', 'config.json'), JSON.stringify({
+    engine: 'pglite',
+    database_path: join(home, 'brain.pglite'),
+  }, null, 2));
 }
 
 describe('CLI structure', () => {
@@ -213,4 +240,41 @@ describe('CLI dispatch integration', () => {
     expect(tools[0]).toHaveProperty('description');
     expect(tools[0]).toHaveProperty('parameters');
   });
+
+  test('put exits cleanly after success in short-lived CLI context', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'gbrain-cli-put-'));
+    try {
+      seedLocalPgliteConfig(home);
+      const proc = Bun.spawn(['bun', 'run', 'src/cli.ts', 'put', 'note/cli-short-lived'], {
+        cwd: repoRoot,
+        stdin: 'pipe',
+        stdout: 'pipe',
+        stderr: 'pipe',
+        env: withoutProviderKeys(isolatedEnv(home)),
+      });
+
+      proc.stdin.write(
+        `---\ntype: note\ntitle: CLI Short Lived\n---\n${'this is a substantive note for lifecycle testing. '.repeat(10)}`,
+      );
+      proc.stdin.end();
+
+      const killer = setTimeout(() => {
+        proc.kill();
+      }, 5000);
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      clearTimeout(killer);
+
+      expect(exitCode).toBe(0);
+      expect(stderr).not.toContain('No brain configured');
+      expect(stdout).toContain('"slug": "note/cli-short-lived"');
+      expect(stdout).toContain('"facts_backstop"');
+      expect(stdout).toContain('"background_disabled"');
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 10000);
 });

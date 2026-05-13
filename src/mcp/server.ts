@@ -90,6 +90,7 @@ export async function handleToolCall(
   const ctx = buildOperationContext(engine, params, {
     remote: false,
     logger: { info: console.log, warn: console.warn, error: console.error },
+    allowBackgroundJobs: false,
     ...(opts?.sourceId ? { sourceId: opts.sourceId } : {}),
   });
 

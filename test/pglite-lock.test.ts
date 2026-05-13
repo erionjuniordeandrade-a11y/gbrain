@@ -6,6 +6,26 @@ import { acquireLock, releaseLock, type LockHandle } from '../src/core/pglite-lo
 
 const TEST_DIR = join(tmpdir(), 'gbrain-lock-test-' + process.pid);
 
+async function captureError(promise: Promise<unknown>): Promise<Error> {
+  try {
+    await promise;
+  } catch (err) {
+    expect(err).toBeInstanceOf(Error);
+    return err as Error;
+  }
+  throw new Error('Expected promise to reject');
+}
+
+function expectLockTimeoutDiagnostics(message: string, lockDir: string): void {
+  expect(message).toContain('GBrain: Timed out waiting for PGLite lock.');
+  expect(message).toContain(`lock_path: ${join(lockDir, 'lock')}`);
+  expect(message).toContain('pid: ');
+  expect(message).toContain('command: ');
+  expect(message).toContain('age: ');
+  expect(message).toContain('process_alive: ');
+  expect(message).toContain('safe_suggestion: Do not delete a live lock.');
+}
+
 describe('pglite-lock', () => {
   beforeEach(() => {
     // Clean up test directory
@@ -43,7 +63,10 @@ describe('pglite-lock', () => {
     expect(lock1.acquired).toBe(true);
 
     // Second lock attempt should timeout
-    await expect(acquireLock(TEST_DIR, { timeoutMs: 1000 })).rejects.toThrow(/Timed out/);
+    const err = await captureError(acquireLock(TEST_DIR, { timeoutMs: 100 }));
+    expectLockTimeoutDiagnostics(err.message, join(TEST_DIR, '.gbrain-lock'));
+    expect(err.message).toContain(`pid: ${process.pid}`);
+    expect(err.message).toContain('process_alive: true');
 
     await releaseLock(lock1);
   });
@@ -74,7 +97,11 @@ describe('pglite-lock', () => {
       command: 'still-running-test-process',
     }));
 
-    await expect(acquireLock(TEST_DIR, { timeoutMs: 250 })).rejects.toThrow(/Timed out/);
+    const err = await captureError(acquireLock(TEST_DIR, { timeoutMs: 100 }));
+    expectLockTimeoutDiagnostics(err.message, lockDir);
+    expect(err.message).toContain(`pid: ${process.pid}`);
+    expect(err.message).toContain('command: still-running-test-process');
+    expect(err.message).toContain('process_alive: true');
 
     const lockData = JSON.parse(readFileSync(join(lockDir, 'lock'), 'utf-8'));
     expect(lockData.command).toBe('still-running-test-process');

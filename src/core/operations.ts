@@ -293,6 +293,12 @@ export interface OperationContext {
    */
   cliOpts?: { quiet: boolean; progressJson: boolean; progressInterval: number };
   /**
+   * True/undefined means operation handlers may start in-process background work
+   * such as the facts backstop queue. Short-lived CLI surfaces set this to false
+   * so a successful write cannot keep the process alive behind the user's back.
+   */
+  allowBackgroundJobs?: boolean;
+  /**
    * v0.28: per-token allow-list for the holder field on `takes`. Threaded
    * by the MCP HTTP/stdio dispatch layer from `access_tokens.permissions.takes_holders`.
    *
@@ -588,37 +594,41 @@ const put_page: Operation = {
     // (MEDIUM facts wait for the dream cycle but DO land via put_page,
     // matching the pre-fix behavior on this surface).
     let factsQueued: { queued: boolean } | { skipped: string } | undefined;
-    try {
-      const { runFactsBackstop } = await import('./facts/backstop.ts');
-      const r = await runFactsBackstop(
-        {
-          slug,
-          type: result.parsedPage!.type,
-          compiled_truth: result.parsedPage!.compiled_truth,
-          frontmatter: result.parsedPage!.frontmatter,
-        },
-        {
-          engine: ctx.engine,
-          sourceId: ctx.sourceId ?? 'default',
-          sessionId: (ctx as { source_session?: string }).source_session ?? null,
-          source: 'mcp:put_page',
-          mode: 'queue',
-        },
-      );
-      if (r.mode === 'queue' && r.enqueued) {
-        factsQueued = { queued: true };
-      } else if (r.mode === 'queue' && r.skipped) {
-        // Preserve the pre-v0.31.2 response shape for MCP clients:
-        // 'kind:guide' / 'too_short' / 'subagent_namespace' / 'dream_generated'
-        // (bare reasons), not the helper's namespaced 'eligibility_failed:...'
-        // discriminator. Map back here.
-        const bare = r.skipped.startsWith('eligibility_failed:')
-          ? r.skipped.slice('eligibility_failed:'.length)
-          : r.skipped;
-        factsQueued = { skipped: bare };
+    if (ctx.allowBackgroundJobs === false) {
+      factsQueued = { skipped: 'background_disabled' };
+    } else {
+      try {
+        const { runFactsBackstop } = await import('./facts/backstop.ts');
+        const r = await runFactsBackstop(
+          {
+            slug,
+            type: result.parsedPage!.type,
+            compiled_truth: result.parsedPage!.compiled_truth,
+            frontmatter: result.parsedPage!.frontmatter,
+          },
+          {
+            engine: ctx.engine,
+            sourceId: ctx.sourceId ?? 'default',
+            sessionId: (ctx as { source_session?: string }).source_session ?? null,
+            source: 'mcp:put_page',
+            mode: 'queue',
+          },
+        );
+        if (r.mode === 'queue' && r.enqueued) {
+          factsQueued = { queued: true };
+        } else if (r.mode === 'queue' && r.skipped) {
+          // Preserve the pre-v0.31.2 response shape for MCP clients:
+          // 'kind:guide' / 'too_short' / 'subagent_namespace' / 'dream_generated'
+          // (bare reasons), not the helper's namespaced 'eligibility_failed:...'
+          // discriminator. Map back here.
+          const bare = r.skipped.startsWith('eligibility_failed:')
+            ? r.skipped.slice('eligibility_failed:'.length)
+            : r.skipped;
+          factsQueued = { skipped: bare };
+        }
+      } catch {
+        factsQueued = { skipped: 'backstop_error' };
       }
-    } catch {
-      factsQueued = { skipped: 'backstop_error' };
     }
 
     // Post-write validator lint (PR 2.5): feature-flag-gated, non-blocking.

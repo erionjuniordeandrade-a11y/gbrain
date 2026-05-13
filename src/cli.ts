@@ -513,6 +513,10 @@ async function makeContext(engine: BrainEngine, params: Record<string, unknown>)
     // confinement (e.g., cwd-locked file_upload).
     remote: false,
     cliOpts: getCliOptions(),
+    // Shared ops like `put` must not leave in-process background work running
+    // after stdout reports success. Long-lived serve/MCP contexts keep the
+    // default queue behavior.
+    allowBackgroundJobs: false,
     ...(sourceId ? { sourceId } : {}),
   };
 }

@@ -77,6 +77,21 @@ describe('put_page facts backstop', () => {
     }
   });
 
+  test('skips queue in short-lived CLI contexts', async () => {
+    const r = await dispatchToolCall(engine, 'put_page', {
+      slug: 'note/short-lived-cli',
+      content: `---\ntype: note\ntitle: Short Lived CLI\n---\n${'this is some real content with meaningful claims. '.repeat(10)}`,
+    }, {
+      remote: false,
+      sourceId: 'default',
+      allowBackgroundJobs: false,
+    });
+
+    expect(r.isError).toBeFalsy();
+    const payload = JSON.parse(r.content[0].text);
+    expect(payload.facts_backstop).toEqual({ skipped: 'background_disabled' });
+  });
+
   test('skipped on non-eligible page kind', async () => {
     const result = await putAndReadBackstop(
       'guides/eg',

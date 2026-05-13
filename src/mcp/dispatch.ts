@@ -70,6 +70,11 @@ export interface DispatchOpts {
    * was replaced by dispatchToolCall.
    */
   auth?: AuthInfo;
+  /**
+   * Short-lived local dispatchers can disable in-process background work.
+   * Server transports leave this unset so queues keep draining in the daemon.
+   */
+  allowBackgroundJobs?: boolean;
 }
 
 /**
@@ -206,6 +211,7 @@ export function buildOperationContext(
     takesHoldersAllowList: opts.takesHoldersAllowList,
     sourceId: opts.sourceId,
     auth: opts.auth,
+    allowBackgroundJobs: opts.allowBackgroundJobs,
   };
 }
 
