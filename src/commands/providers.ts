@@ -11,6 +11,7 @@ import { probeOllama, probeLMStudio } from '../core/ai/probes.ts';
 import { loadConfig } from '../core/config.ts';
 import { AIConfigError, AITransientError } from '../core/ai/errors.ts';
 import type { Recipe } from '../core/ai/types.ts';
+import type { GBrainConfig } from '../core/config.ts';
 
 const SCHEMA_VERSION = 1;
 
@@ -31,6 +32,15 @@ interface ProviderOption {
   cons: string[];
 }
 
+function envFromConfig(config: GBrainConfig | null): Record<string, string | undefined> {
+  return {
+    ...(config?.openai_api_key ? { OPENAI_API_KEY: config.openai_api_key } : {}),
+    ...(config?.anthropic_api_key ? { ANTHROPIC_API_KEY: config.anthropic_api_key } : {}),
+    ...(config?.google_api_key ? { GOOGLE_GENERATIVE_AI_API_KEY: config.google_api_key } : {}),
+    ...process.env,
+  };
+}
+
 function configureFromEnv(): void {
   const config = loadConfig();
   configureGateway({
@@ -40,14 +50,14 @@ function configureFromEnv(): void {
     chat_model: config?.chat_model,
     chat_fallback_chain: config?.chat_fallback_chain,
     base_urls: config?.provider_base_urls,
-    env: { ...process.env },
+    env: envFromConfig(config),
   });
 }
 
-function envReady(recipe: Recipe): boolean {
+function envReady(recipe: Recipe, env: Record<string, string | undefined> = envFromConfig(loadConfig())): boolean {
   const required = recipe.auth_env?.required ?? [];
   if (required.length === 0) return true; // e.g. local Ollama
-  return required.every(k => !!process.env[k]);
+  return required.every(k => !!env[k]);
 }
 
 export async function runProviders(subcommand: string | undefined, args: string[]): Promise<void> {
@@ -99,6 +109,7 @@ EXAMPLES
 
 function runList(_args: string[]): void {
   const recipes = listRecipes();
+  const env = envFromConfig(loadConfig());
   const rows: string[] = [];
   rows.push('PROVIDER'.padEnd(14) + 'TIER'.padEnd(18) + 'EMBED'.padEnd(8) + 'EXPAND'.padEnd(8) + 'CHAT'.padEnd(8) + 'STATUS');
   rows.push('-'.repeat(78));
@@ -106,7 +117,7 @@ function runList(_args: string[]): void {
     const hasEmbed = !!r.touchpoints.embedding && (r.touchpoints.embedding.models.length > 0);
     const hasExpand = !!r.touchpoints.expansion;
     const hasChat = !!r.touchpoints.chat && r.touchpoints.chat.models.length > 0;
-    const ready = envReady(r);
+    const ready = envReady(r, env);
     const status = ready ? '✓ ready' : `✗ missing ${r.auth_env?.required?.[0] ?? 'setup'}`;
     rows.push(
       r.id.padEnd(14) +
@@ -134,6 +145,8 @@ async function runTest(args: string[]): Promise<void> {
 
   // If --model passed, override gateway for this test (touchpoint-aware).
   if (modelArg) {
+    const config = loadConfig();
+    const env = envFromConfig(config);
     const [providerId, ...modelParts] = modelArg.split(':');
     const modelId = modelParts.join(':');
     const recipe = getRecipe(providerId);
@@ -142,12 +155,12 @@ async function runTest(args: string[]): Promise<void> {
       configureGateway({
         embedding_model: modelArg,
         embedding_dimensions: dims,
-        env: { ...process.env },
+        env,
       });
     } else {
       configureGateway({
         chat_model: modelArg,
-        env: { ...process.env },
+        env,
       });
     }
   }
@@ -204,12 +217,13 @@ function runEnv(args: string[]): void {
   }
   console.log(`${recipe.name} (${recipe.id})`);
   console.log('');
+  const env = envFromConfig(loadConfig());
   const required = recipe.auth_env?.required ?? [];
   const optional = recipe.auth_env?.optional ?? [];
   if (required.length > 0) {
     console.log('Required:');
     for (const k of required) {
-      const set = !!process.env[k];
+      const set = !!env[k];
       console.log(`  ${k.padEnd(32)} ${set ? '✓ set' : '✗ not set'}`);
     }
   } else {
@@ -218,7 +232,7 @@ function runEnv(args: string[]): void {
   if (optional.length > 0) {
     console.log('\nOptional:');
     for (const k of optional) {
-      const set = !!process.env[k];
+      const set = !!env[k];
       console.log(`  ${k.padEnd(32)} ${set ? '✓ set' : '✗ not set'}`);
     }
   }
@@ -234,14 +248,15 @@ async function runExplain(args: string[]): Promise<void> {
   const asJson = args.includes('--json') || args.includes('-j');
 
   const recipes = listRecipes();
+  const env = envFromConfig(loadConfig());
   const env_detected = {
-    OPENAI_API_KEY: !!process.env.OPENAI_API_KEY,
-    GOOGLE_GENERATIVE_AI_API_KEY: !!process.env.GOOGLE_GENERATIVE_AI_API_KEY,
-    ANTHROPIC_API_KEY: !!process.env.ANTHROPIC_API_KEY,
-    VOYAGE_API_KEY: !!process.env.VOYAGE_API_KEY,
-    DEEPSEEK_API_KEY: !!process.env.DEEPSEEK_API_KEY,
-    GROQ_API_KEY: !!process.env.GROQ_API_KEY,
-    TOGETHER_API_KEY: !!process.env.TOGETHER_API_KEY,
+    OPENAI_API_KEY: !!env.OPENAI_API_KEY,
+    GOOGLE_GENERATIVE_AI_API_KEY: !!env.GOOGLE_GENERATIVE_AI_API_KEY,
+    ANTHROPIC_API_KEY: !!env.ANTHROPIC_API_KEY,
+    VOYAGE_API_KEY: !!env.VOYAGE_API_KEY,
+    DEEPSEEK_API_KEY: !!env.DEEPSEEK_API_KEY,
+    GROQ_API_KEY: !!env.GROQ_API_KEY,
+    TOGETHER_API_KEY: !!env.TOGETHER_API_KEY,
   };
 
   // Parallel probes for local providers (1s timeout each)
@@ -258,7 +273,7 @@ async function runExplain(args: string[]): Promise<void> {
         dims: m.default_dims,
         cost_per_1m_tokens_usd: m.cost_per_1m_tokens_usd,
         price_last_verified: m.price_last_verified,
-        env_ready: envReady(r) || (r.id === 'ollama' && ollama.models_endpoint_valid === true),
+        env_ready: envReady(r, env) || (r.id === 'ollama' && ollama.models_endpoint_valid === true),
         tier: r.tier,
         pros: prosFor(r, 'embedding'),
         cons: consFor(r),
@@ -272,7 +287,7 @@ async function runExplain(args: string[]): Promise<void> {
         model: m.models[0],
         cost_per_1m_tokens_usd: m.cost_per_1m_tokens_usd,
         price_last_verified: m.price_last_verified,
-        env_ready: envReady(r),
+        env_ready: envReady(r, env),
         tier: r.tier,
         pros: prosFor(r, 'expansion'),
         cons: consFor(r),
@@ -287,7 +302,7 @@ async function runExplain(args: string[]): Promise<void> {
         cost_per_1m_input_usd: m.cost_per_1m_input_usd,
         cost_per_1m_output_usd: m.cost_per_1m_output_usd,
         price_last_verified: m.price_last_verified,
-        env_ready: envReady(r),
+        env_ready: envReady(r, env),
         tier: r.tier,
         pros: prosFor(r, 'chat'),
         cons: consFor(r),

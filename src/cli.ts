@@ -969,6 +969,14 @@ async function handleCliOnly(command: string, args: string[]) {
     }
   }
 
+  // `config show` and file-plane config keys (embedding model/dimensions and
+  // API keys) do not need a DB connection. Handle them before connectEngine()
+  // so a running `gbrain serve` PGLite lock cannot block basic configuration.
+  if (command === 'config') {
+    const { runConfigFileOnly } = await import('./commands/config.ts');
+    if (runConfigFileOnly(args)) return;
+  }
+
   // All remaining CLI-only commands need a DB connection
   const engine = await connectEngine();
   try {
@@ -1269,6 +1277,7 @@ function buildGatewayConfig(c: GBrainConfig): AIGatewayConfig {
   const envFromConfig: Record<string, string> = {};
   if (c.openai_api_key) envFromConfig.OPENAI_API_KEY = c.openai_api_key;
   if (c.anthropic_api_key) envFromConfig.ANTHROPIC_API_KEY = c.anthropic_api_key;
+  if (c.google_api_key) envFromConfig.GOOGLE_GENERATIVE_AI_API_KEY = c.google_api_key;
 
   // v0.32 codex finding #4+#5 fix: thread local-server _BASE_URL env vars
   // into base_urls so the gateway hits the user's configured port. Without
