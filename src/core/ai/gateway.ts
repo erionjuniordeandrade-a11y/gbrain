@@ -908,16 +908,34 @@ async function embedSubBatch(
       providerOptions: providerOpts,
     });
 
-    const first = result.embeddings?.[0];
-    if (first && Array.isArray(first) && first.length !== expectedDims) {
+    const embs = result.embeddings ?? [];
+    if (embs.length !== texts.length) {
       throw new AIConfigError(
-        `Embedding dim mismatch: model ${modelId} returned ${first.length} but schema expects ${expectedDims}.`,
-        `Run \`gbrain migrate --embedding-model ${getEmbeddingModel()} --embedding-dimensions ${first.length}\` or change models.`,
+        `Embedding count mismatch: model ${modelId} returned ${embs.length} embeddings for ${texts.length} inputs.`,
+        `Provider may have silently dropped inputs (safety filter, empty-after-tokenization). Retry with shorter/sanitized chunks.`,
       );
+    }
+    for (let i = 0; i < embs.length; i++) {
+      const e = embs[i];
+      if (!Array.isArray(e) || e.length === 0) {
+        const preview = (texts[i] ?? '').slice(0, 120).replace(/\s+/g, ' ');
+        throw new AIConfigError(
+          `Empty embedding at index ${i} from ${modelId} (input ${texts[i]?.length ?? 0} chars).`,
+          `Provider returned []. Likely safety-filtered or empty-after-tokenization. Input preview: ${JSON.stringify(preview)}`,
+        );
+      }
+      if (e.length !== expectedDims) {
+        throw new AIConfigError(
+          `Embedding dim mismatch at index ${i}: model ${modelId} returned ${e.length} but schema expects ${expectedDims}.`,
+          i === 0
+            ? `Run \`gbrain migrate --embedding-model ${getEmbeddingModel()} --embedding-dimensions ${e.length}\` or change models.`
+            : `Inconsistent dims within batch — provider bug or input-specific filtering.`,
+        );
+      }
     }
 
     recordSubBatchSuccess(recipe);
-    return result.embeddings.map((e: number[]) => new Float32Array(e));
+    return embs.map((e: number[]) => new Float32Array(e));
   } catch (err) {
     // On token-limit error, tighten the recipe's effective safety factor
     // (so the next embed() pre-splits smaller) and recursively halve THIS
