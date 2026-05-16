@@ -1036,13 +1036,18 @@ export async function runDoctor(engine: BrainEngine | null, args: string[], dbSo
       // anywhere.
       let msg: string;
       if (fastMode && dbSource) {
-        msg = `Skipping DB checks (--fast mode, URL present from ${dbSource})`;
+        // --fast deliberately skips DB checks; that is the requested
+        // behavior, not a degraded state. Emit `ok` so smoke / skillpack
+        // health reports don't flag a healthy fast run as a warning.
+        msg = `DB checks intentionally skipped (--fast mode, URL present from ${dbSource})`;
+        checks.push({ name: 'connection', status: 'ok', message: msg });
       } else if (!fastMode && dbSource) {
         msg = `Could not connect to configured DB (URL from ${dbSource}); filesystem checks only`;
+        checks.push({ name: 'connection', status: 'warn', message: msg });
       } else {
         msg = 'No database configured (filesystem checks only). Set GBRAIN_DATABASE_URL or run `gbrain init`.';
+        checks.push({ name: 'connection', status: 'warn', message: msg });
       }
-      checks.push({ name: 'connection', status: 'warn', message: msg });
     }
     const earlyFail1 = outputResults(checks, jsonOutput);
     process.exit(earlyFail1 ? 1 : 0);

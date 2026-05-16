@@ -78,7 +78,7 @@ describe('doctor command', () => {
     const source = await Bun.file(new URL('../src/commands/doctor.ts', import.meta.url)).text();
     // The source-aware message must reference the variable name so users
     // know where their URL is coming from.
-    expect(source).toContain('Skipping DB checks (--fast mode, URL present from');
+    expect(source).toContain('DB checks intentionally skipped (--fast mode, URL present from');
     // The null-source fallback must still mention both config + env paths.
     expect(source).toContain('GBRAIN_DATABASE_URL');
   });
