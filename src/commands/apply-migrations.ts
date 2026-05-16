@@ -358,7 +358,12 @@ export async function runApplyMigrations(args: string[]): Promise<void> {
   // apply-migrations runs orchestrator migrations only; schema migrations
   // run via connectEngine() / initSchema(). Users often expect this CLI
   // to handle everything (Issue 1 from v0.18.0 field report).
-  try {
+  //
+  // Skip entirely for --list / --dry-run: those are read-only,
+  // filesystem-only reporting paths (also the cron / skillpack-check
+  // path). Connecting here just to print a warning means an unreachable
+  // DB stalls the report for the full connect timeout (~30s).
+  if (!cli.list && !cli.dryRun) try {
     const { LATEST_VERSION } = await import('../core/migrate.ts');
     const { loadConfig: lc, toEngineConfig } = await import('../core/config.ts');
     const { createEngine } = await import('../core/engine-factory.ts');
