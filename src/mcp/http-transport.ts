@@ -128,6 +128,13 @@ export async function startHttpTransport(opts: HttpTransportOptions) {
   const bodyCap = envInt('GBRAIN_HTTP_MAX_BODY_BYTES', DEFAULT_BODY_CAP);
   const corsAllowlist = parseCorsAllowlist();
   const tools = buildToolDefs(operations);
+  for (const tool of tools) {
+    for (const property of Object.values(tool.inputSchema.properties) as Array<{ type?: string; items?: unknown }>) {
+      if (property.type === 'array' && !property.items) {
+        property.items = { type: 'string' };
+      }
+    }
+  }
 
   function corsHeaders(origin: string | null, extra: Record<string, string> = {}): Record<string, string> {
     const headers: Record<string, string> = { ...extra };

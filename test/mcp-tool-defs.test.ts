@@ -25,7 +25,7 @@ function legacyInlineMap(ops: typeof operations) {
           type: v.type === 'array' ? 'array' : v.type,
           ...(v.description ? { description: v.description } : {}),
           ...(v.enum ? { enum: v.enum } : {}),
-          ...(v.items ? { items: { type: v.items.type } } : {}),
+          ...(v.type === 'array' ? { items: { type: v.items?.type ?? 'string' } } : {}),
         }]),
       ),
       required: Object.entries(op.params)
@@ -62,6 +62,17 @@ describe('buildToolDefs', () => {
       expect(def.inputSchema.type).toBe('object');
       expect(typeof def.inputSchema.properties).toBe('object');
       expect(Array.isArray(def.inputSchema.required)).toBe(true);
+    }
+  });
+
+  test('all array parameters include JSON Schema items for OpenAI/Hermes compatibility', () => {
+    for (const def of buildToolDefs(operations)) {
+      for (const [name, schema] of Object.entries(def.inputSchema.properties)) {
+        const property = schema as { type?: string; items?: unknown };
+        if (property.type === 'array') {
+          expect(property.items, `${def.name}.${name} is missing items`).toBeDefined();
+        }
+      }
     }
   });
 });

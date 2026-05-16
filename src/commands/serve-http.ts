@@ -817,6 +817,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
                 type: v.type,
                 description: v.description,
                 ...(v.enum ? { enum: v.enum } : {}),
+                ...(v.type === 'array' ? { items: { type: v.items?.type ?? 'string' } } : {}),
                 ...(v.default !== undefined ? { default: v.default } : {}),
               }]),
             ),

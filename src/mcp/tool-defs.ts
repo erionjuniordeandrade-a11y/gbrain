@@ -21,7 +21,10 @@ export function buildToolDefs(ops: Operation[]): McpToolDef[] {
           type: v.type === 'array' ? 'array' : v.type,
           ...(v.description ? { description: v.description } : {}),
           ...(v.enum ? { enum: v.enum } : {}),
-          ...(v.items ? { items: { type: v.items.type } } : {}),
+          // OpenAI/Hermes reject array schemas without `items`. Keep explicit
+          // operation item types when present and fail closed to string items
+          // for legacy array params instead of emitting an invalid tool schema.
+          ...(v.type === 'array' ? { items: { type: v.items?.type ?? 'string' } } : {}),
         }]),
       ),
       required: Object.entries(op.params)
