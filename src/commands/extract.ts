@@ -315,6 +315,13 @@ export interface ExtractOpts {
    * Pass undefined or omit for a full walk (CLI / first-run path).
    */
   slugs?: string[];
+  /**
+   * Source ID for the brain being walked. Used to set from_source_id /
+   * to_source_id on link batch inserts so the page JOIN matches multi-source
+   * rows (source_id != 'default'). Omit for single-source brains whose
+   * pages were synced with source_id = 'default'.
+   */
+  sourceId?: string;
 }
 
 /**
@@ -351,7 +358,7 @@ export async function runExtractCore(engine: BrainEngine, opts: ExtractOpts): Pr
 
   // Full walk path: CLI `gbrain extract` or first-run.
   if (opts.mode === 'links' || opts.mode === 'all') {
-    const r = await extractLinksFromDir(engine, opts.dir, dryRun, jsonMode);
+    const r = await extractLinksFromDir(engine, opts.dir, dryRun, jsonMode, opts.sourceId);
     result.links_created = r.created;
     result.pages_processed = r.pages;
   }
@@ -467,6 +474,7 @@ export async function runExtract(engine: BrainEngine, args: string[]) {
         dir: brainDir,
         dryRun,
         jsonMode,
+        sourceId: sourceIdFilter ?? undefined,
       });
     }
   } catch (e) {
@@ -595,6 +603,7 @@ async function extractForSlugs(
 
 async function extractLinksFromDir(
   engine: BrainEngine, brainDir: string, dryRun: boolean, jsonMode: boolean,
+  sourceId?: string,
 ): Promise<{ created: number; pages: number }> {
   const files = walkMarkdownFiles(brainDir);
   const allSlugs = new Set(files.map(f => pathToSlug(f.relPath)));
@@ -639,7 +648,7 @@ async function extractLinksFromDir(
           if (!jsonMode) console.log(`  ${link.from_slug} → ${link.to_slug} (${link.link_type})`);
           created++;
         } else {
-          batch.push(link);
+          batch.push({ ...link, from_source_id: sourceId, to_source_id: sourceId });
           if (batch.length >= BATCH_SIZE) await flush();
         }
       }
