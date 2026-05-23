@@ -53,6 +53,8 @@ interface DreamArgs {
    * Never auto-applied for --input (codex finding #3).
    */
   bypassDreamGuard: boolean;
+  /** Restrict cycle to a single registered source and record last_full_cycle_at on it. */
+  sourceId: string | null;
 }
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -88,6 +90,9 @@ function parseArgs(args: string[]): DreamArgs {
     process.exit(2);
   }
 
+  const sourceIdx = args.indexOf('--source');
+  const sourceId = sourceIdx !== -1 ? (args[sourceIdx + 1] ?? null) : null;
+
   const toIdx = args.indexOf('--to');
   const to = toIdx !== -1 ? args[toIdx + 1] ?? null : null;
   if (to && !ISO_DATE_RE.test(to)) {
@@ -121,6 +126,7 @@ function parseArgs(args: string[]): DreamArgs {
     from,
     to,
     bypassDreamGuard: args.includes('--unsafe-bypass-dream-guard'),
+    sourceId,
   };
 }
 
@@ -179,6 +185,7 @@ Options:
   --phase <name>      Run a single phase: ${ALL_PHASES.join(' | ')}
   --pull              git pull the brain repo before syncing (default: no pull)
   --dir <path>        Brain directory (default: configured brain)
+  --source <id>       Restrict cycle to one source and record last_full_cycle_at
 
   --input <file>      Synthesize a specific transcript file (implies
                       --phase synthesize). Bypasses corpus-dir scan.
@@ -280,6 +287,7 @@ export async function runDream(engine: BrainEngine | null, args: string[]): Prom
     dryRun: opts.dryRun,
     pull: opts.pull,
     phases,
+    sourceId: opts.sourceId ?? undefined,
     synthInputFile: opts.inputFile ?? undefined,
     synthDate: opts.date ?? undefined,
     synthFrom: opts.from ?? undefined,
