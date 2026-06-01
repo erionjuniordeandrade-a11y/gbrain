@@ -299,6 +299,9 @@ function runSkillifyCheckTarget(target: string, root: string): CheckResult {
   const brainFirst = checkBrainFirstCompliance(skillMd, skillName);
   items.push(check('Brain-first compliance', brainFirst.passed, brainFirst.detail));
 
+  const skillOpt = checkSkillOptDiscipline(skillMd);
+  items.push(checkOptional('SkillOpt self-edit discipline', skillOpt.passed, skillOpt.detail));
+
   const passed = items.filter(i => i.passed).length;
   const total = items.length;
   const missing = items.filter(i => !i.passed && i.required).map(i => i.name);
@@ -397,6 +400,31 @@ function checkBrainFirstCompliance(
       buildBrainFirstSummaryLine(analysis) +
       ` — Fix: add canonical Convention callout (see conventions/brain-first.md), or set 'brain_first: exempt' in frontmatter.`,
   };
+}
+
+function checkSkillOptDiscipline(skillMdPath: string): { passed: boolean; detail: string } {
+  if (!existsSync(skillMdPath)) {
+    return { passed: false, detail: 'no SKILL.md — cannot inspect protected invariants' };
+  }
+  let content = '';
+  try {
+    content = readFileSync(skillMdPath, 'utf-8');
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { passed: false, detail: `could not read SKILL.md: ${msg}` };
+  }
+  const hasProtected = /protected invariants|slow state/i.test(content);
+  const hasBounded = /4\s*[-–]\s*8\s+bounded edits|bounded edits/i.test(content);
+  const hasValidation = /validation gate|held[- ]out|cross-modal eval/i.test(content);
+  const missing = [
+    hasProtected ? null : 'protected invariants',
+    hasBounded ? null : 'bounded edits',
+    hasValidation ? null : 'validation gate',
+  ].filter(Boolean) as string[];
+  if (missing.length === 0) {
+    return { passed: true, detail: 'protected invariants + bounded edits + validation gate present' };
+  }
+  return { passed: false, detail: `missing ${missing.join(', ')} (informational SkillOpt hygiene)` };
 }
 
 function recentlyModified(root: string, days: number = 7): string[] {

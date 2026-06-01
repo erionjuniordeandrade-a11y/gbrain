@@ -70,6 +70,13 @@ export function skillMdTemplate(v: ScaffoldVars): string {
     'for the lookup chain (search → query → get_page → external).',
   );
   lines.push('');
+  lines.push('## Protected invariants (slow state — do not overwrite)');
+  lines.push('');
+  lines.push('- Preserve this section during any self-edit or SkillOpt-style optimization pass.');
+  lines.push('- Improve by proposing 4-8 bounded edits, never by rewriting the whole SKILL.md.');
+  lines.push('- Accept an edit only after the validation gate shows strict improvement; ties are rejected.');
+  lines.push('- Keep the skill compact and high-signal; target ~900-1200 tokens unless the domain truly needs more.');
+  lines.push('');
   lines.push('## The rule');
   lines.push('');
   lines.push(`<!-- ${SKILLIFY_STUB_MARKER} -->`);
@@ -86,7 +93,7 @@ export function skillMdTemplate(v: ScaffoldVars): string {
   // 11-item contract (T7=C in plans/radiant-napping-lerdorf.md): the new
   // Phase 3 cross-modal eval is informational. The scaffold tells the
   // implementer where the gate lives without forcing it as a blocker.
-  lines.push('## Phase 3: Cross-modal eval (informational)');
+  lines.push('## Phase 3: Validation gate (cross-modal eval, informational)');
   lines.push('');
   lines.push(
     `Once the SKILL.md body and \`scripts/${v.name}.mjs\` are real, run the cross-modal`,

@@ -60,6 +60,24 @@ describe('WARN-5 — `gbrain capture --help` reaches the detailed HELP constant'
   });
 });
 
+describe('SKILLOPT — `gbrain skillify --help` reaches the skillify dispatcher', () => {
+  test('top-level skillify help lists scaffold and check subcommands', () => {
+    const { stdout, status } = runCli(['skillify', '--help']);
+    expect(status).toBe(0);
+    expect(stdout).toContain('gbrain skillify <subcommand>');
+    expect(stdout).toContain('scaffold <name>');
+    expect(stdout).toContain('check    [path]');
+    expect(stdout).not.toContain('run gbrain --help for the full command list');
+  });
+
+  test('skillify scaffold help exposes the bounded-edit scaffold contract', () => {
+    const { stdout, status } = runCli(['skillify', 'scaffold', '--help']);
+    expect(status).toBe(0);
+    expect(stdout).toContain('Create 5 scaffold files');
+    expect(stdout).toContain('bounded-edit');
+  });
+});
+
 describe('WARN-6 — main `gbrain --help` lists capture/brainstorm/lsd', () => {
   test('output mentions all three commands by name', () => {
     const { stdout, status } = runCli(['--help']);

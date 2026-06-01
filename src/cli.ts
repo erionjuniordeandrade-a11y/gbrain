@@ -34,7 +34,7 @@ const CLI_ONLY = new Set(['init', 'reinit-pglite', 'upgrade', 'post-upgrade', 'c
 const CLI_ONLY_SELF_HELP = new Set([
   'upgrade', 'post-upgrade', 'check-update',
   'embed', 'config',
-  'skillpack', 'skillpack-check',
+  'skillpack', 'skillpack-check', 'skillify',
   'integrations', 'friction',
   'frontmatter', 'check-resolvable',
   'models',

@@ -46,6 +46,16 @@ describe('skillify-check CLI', () => {
     expect(result.stdout).toMatch(/\d+\/\d+/);
   });
 
+  test('skillify surfaces SkillOpt self-edit discipline as an audit item', () => {
+    const result = run(['src/commands/skillify.ts', '--json']);
+    const parsed = JSON.parse(result.stdout);
+    const item = parsed[0].items.find((i: any) => i.name === 'SkillOpt self-edit discipline');
+    expect(item).toBeDefined();
+    expect(item.passed).toBe(true);
+    expect(item.required).toBe(false);
+    expect(item.detail).toContain('protected invariants');
+  });
+
   test('--json emits a parseable array with the expected shape', () => {
     const result = run(['src/commands/publish.ts', '--json']);
     expect(result.stdout.trim()).toMatch(/^\[/);

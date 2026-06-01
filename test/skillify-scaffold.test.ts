@@ -443,7 +443,9 @@ describe('11-item scaffold contract (T9 + Phase 3 cross-modal eval)', () => {
     const skillMdPath = join(skillsDir, 'phase-three-demo', 'SKILL.md');
     const body = readFileSync(skillMdPath, 'utf-8');
 
-    expect(body).toContain('## Phase 3: Cross-modal eval');
+    expect(body).toContain('## Protected invariants (slow state — do not overwrite)');
+    expect(body).toContain('4-8 bounded edits');
+    expect(body).toContain('## Phase 3: Validation gate');
     expect(body).toContain('gbrain eval cross-modal');
     expect(body).toContain('skills/phase-three-demo/SKILL.md');
     // Receipts naming convention is documented in the scaffold so the

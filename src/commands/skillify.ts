@@ -94,6 +94,10 @@ Create 5 scaffold files for a new skill:
   5. (append) RESOLVER.md or AGENTS.md      trigger row under "## Uncategorized"
 
 All generated files carry the SKILLIFY_STUB sentinel until replaced.
+The generated SKILL.md also carries a bounded-edit self-optimization
+contract: future skill-improvement loops should propose 4-8 bounded edits,
+protect slow-state invariants, and rerun the validation gate before tests
+lock in behavior.
 \`gbrain check-resolvable --strict\` fails if any skill still has the
 sentinel in its committed script.
 

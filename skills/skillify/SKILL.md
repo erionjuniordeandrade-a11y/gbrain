@@ -32,10 +32,13 @@ mutating: true
 
 ## Contract
 
-A feature is "properly skilled" when all 11 checklist items pass. Item 3
-(cross-modal eval) is informational in v1.1.0 — it does not gate the
-skillpack-check audit, but a missing or stale receipt is surfaced so the
-user knows where the gate stands.
+A feature is "properly skilled" when the required checklist items pass and
+self-editing is constrained by a verifier. Cross-modal eval is informational in
+v1.1.0, but every improvement loop must use it (or an explicit held-out
+verifier) before tests lock in behavior. Skill edits are not free-form rewrites:
+propose 4-8 bounded edits, preserve protected slow-state invariants, reject
+ties, and track per-skill effect size instead of hiding regressions in aggregate
+averages.
 
 ## The Checklist
 
@@ -52,6 +55,25 @@ user knows where the gate stands.
 □ 10. E2E test           — smoke test: trigger → side effect
 □ 11. Brain filing       — if it writes pages, entry in brain/RESOLVER.md
 ```
+
+## Protected invariants (slow state — do not overwrite)
+
+These are the SkillOpt-inspired invariants for this meta-skill:
+
+- Validation gate first: no self-editing loop ships without a held-out gate,
+  strict improvement requirement, and tie rejection.
+- Bounded edits only: each optimization cycle proposes 4-8 targeted patches;
+  full SKILL.md rewrites are treated as unstable unless a human explicitly asks.
+- Compactness wins: aim for ~900-1200 tokens of high-signal procedure. Move
+  verbose examples to references instead of bloating the hot skill body.
+- Description and body are separate surfaces: the resolver sees description and
+  triggers; the activated agent sees the body. Test both surfaces independently.
+- Per-skill effect size matters more than aggregate averages. A routing or eval
+  change that helps the corpus while hurting one important skill must be called
+  out, not averaged away.
+- Fast state must not overwrite slow lessons. Receipts, eval runs, and recent
+  examples are fast state; protected invariants and hard-won failure lessons are
+  slow state.
 
 ## Phase 0: Should This Be a Skill?
 
@@ -95,7 +117,7 @@ Body must include: **Contract** (what it guarantees), **Phases** (step-by-step),
 
 Extract deterministic code into `scripts/*.ts`.
 
-## Phase 3: Cross-Modal Eval (item 3) — THE QUALITY GATE
+## Phase 3: Validation Gate (item 3) — THE QUALITY GATE
 
 ### Why this comes before tests
 
@@ -158,14 +180,15 @@ CYCLE 1:
   Eval → scores + top 10 improvements
   IF pass: → done, write tests
   ELSE:
-    Apply top 10 improvements to the actual file
-    Log: which improvements applied, what changed
+    Select 4-8 bounded edits (no full rewrites, preserve Protected invariants)
+    Apply only edits that target failed dimensions or verifier gaps
+    Log: which improvements applied, what changed, per-skill expected effect
 
 CYCLE 2:
   Re-eval the FIXED output (same 3 models, same dimensions)
   Compare: before/after scores per dimension (track delta)
   IF pass: → done, write tests
-  ELSE: apply remaining improvements + new ones
+  ELSE: select another 4-8 bounded edits from remaining/new failures
 
 CYCLE 3 (final):
   Re-eval
