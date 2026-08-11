@@ -5,6 +5,9 @@
  *   takes <slug>                          — list takes for a page
  *   takes list                            — list all active takes (#2079)
  *   takes search "<query>" [--who h]       — keyword search across all takes
+ *   takes proposals ...                    — inspect pending generated proposals
+ *   takes accept <proposal-id> ...          — review + promote one proposal
+ *   takes reject <proposal-id> ...          — record a review rejection
  *   takes add <slug> ...flags              — append a take (markdown + DB)
  *   takes update <slug> --row N ...flags   — update mutable fields
  *   takes supersede <slug> --row N ...     — strikethrough old + append new
@@ -20,7 +23,7 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import type { BrainEngine, TakeKind } from '../core/engine.ts';
 import {
   parseTakesFence,
@@ -31,6 +34,17 @@ import {
 import { withPageLock } from '../core/page-lock.ts';
 import { resolveSourceId } from '../core/source-resolver.ts';
 import { resolveOwnerHolder } from '../core/owner-holder.ts';
+import { parseMarkdown } from '../core/markdown.ts';
+import {
+  acceptTakeProposal,
+  getTakeProposal,
+  isTakeProposalStatus,
+  listTakeProposals,
+  rejectTakeProposal,
+  takeProposalContentHash,
+  type TakeProposal,
+  type TakeProposalStatus,
+} from '../core/take-proposals.ts';
 
 // --- Helpers ---
 
@@ -113,8 +127,8 @@ async function getPageId(engine: BrainEngine, slug: string, sourceId?: string): 
 // reintroducing the pre-#2698 cross-source write bug whenever resolution
 // merely errored instead of resolving cleanly. Let it propagate so the
 // write is blocked instead of silently unscoped.
-async function resolveTakesSourceId(engine: BrainEngine): Promise<string> {
-  return resolveSourceId(engine, null);
+async function resolveTakesSourceId(engine: BrainEngine, explicit?: string): Promise<string> {
+  return resolveSourceId(engine, explicit ?? null);
 }
 
 function readBodyOrEmpty(path: string): string {
@@ -125,6 +139,210 @@ function readBodyOrEmpty(path: string): string {
 function writeBody(path: string, body: string): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, body, 'utf-8');
+}
+
+function proposalId(args: string[], action: 'accept' | 'reject'): number {
+  const raw = args[0];
+  const id = raw ? Number(raw) : NaN;
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    console.error(`Usage: gbrain takes ${action} <proposal-id> [--by <reviewer>] [--source-id <id>]`);
+    process.exit(1);
+  }
+  return id;
+}
+
+async function proposalActor(engine: BrainEngine, args: string[]): Promise<string> {
+  const configuredOwner = await engine.getConfig('emotional_weight.user_holder');
+  const actor = (flagValue(args, '--by') ?? resolveOwnerHolder({ configValue: configuredOwner })).trim();
+  if (!actor || actor.length > 200 || actor.includes('\0')) {
+    throw new Error('Reviewer identity must be a non-empty string up to 200 characters without NUL bytes.');
+  }
+  return actor;
+}
+
+/**
+ * Proposal promotion must write the actual source repository, not whichever
+ * global sync directory happens to be configured. A non-default source with
+ * no local path is therefore reviewable but intentionally not promotable.
+ */
+async function resolveProposalSourceDir(
+  engine: BrainEngine,
+  sourceId: string,
+  explicitDir: string | undefined,
+): Promise<string> {
+  const rows = await engine.executeRaw<{ local_path: string | null }>(
+    `SELECT local_path FROM sources WHERE id = $1`,
+    [sourceId],
+  );
+  const sourcePath = rows[0]?.local_path ?? null;
+  const configuredDefaultPath = sourceId === 'default'
+    ? await engine.getConfig('sync.repo_path')
+    : null;
+  if (sourceId !== 'default' && !sourcePath) {
+    throw new Error(
+      `Cannot promote a proposal for source '${sourceId}' without a registered local source path. ` +
+      `Review it with --json, then register the source before accepting it.`,
+    );
+  }
+  const target = sourcePath ?? configuredDefaultPath ?? explicitDir;
+  if (!target || !existsSync(target)) {
+    throw new Error(
+      `Cannot promote a proposal for source '${sourceId}' without its local source path. ` +
+      `Register the source path with \`gbrain sources add\` (or configure sync.repo_path for default).`,
+    );
+  }
+  if (explicitDir && sourcePath && resolve(explicitDir) !== resolve(sourcePath)) {
+    throw new Error(
+      `--dir must match the registered local path for source '${sourceId}'; refusing to write a different repository.`,
+    );
+  }
+  return target;
+}
+
+async function currentProposalForPromotion(
+  engine: BrainEngine,
+  proposalIdValue: number,
+  sourceId: string,
+): Promise<TakeProposal> {
+  const proposal = await getTakeProposal(engine, proposalIdValue, sourceId);
+  if (!proposal) {
+    throw new Error(`Proposal #${proposalIdValue} was not found in source '${sourceId}'.`);
+  }
+  return proposal;
+}
+
+function assertPendingProposal(proposal: TakeProposal): void {
+  if (proposal.status !== 'pending') {
+    throw new Error(`Proposal #${proposal.id} is already ${proposal.status}; only pending proposals can be promoted.`);
+  }
+  if (proposal.page_id === null || proposal.evidence.status !== 'current') {
+    throw new Error(
+      `Proposal #${proposal.id} no longer matches its indexed source evidence (${proposal.evidence.status}); ` +
+      `review the current page and generate a fresh proposal instead.`,
+    );
+  }
+}
+
+async function cmdProposals(engine: BrainEngine, args: string[]): Promise<void> {
+  const json = flagPresent(args, '--json');
+  const sourceId = await resolveTakesSourceId(engine, flagValue(args, '--source-id'));
+  const rawStatus = flagValue(args, '--status');
+  const allStatuses = flagPresent(args, '--all');
+  let status: TakeProposalStatus | undefined;
+  if (rawStatus !== undefined) {
+    if (!isTakeProposalStatus(rawStatus)) {
+      throw new Error(`Invalid proposal status '${rawStatus}'. Expected pending, accepted, rejected, or superseded.`);
+    }
+    status = rawStatus;
+  }
+  const limit = Number(flagValue(args, '--limit') ?? 100);
+  const offset = Number(flagValue(args, '--offset') ?? 0);
+  if (!Number.isSafeInteger(limit) || limit < 1 || !Number.isSafeInteger(offset) || offset < 0) {
+    throw new Error('Proposal --limit must be a positive integer and --offset must be a non-negative integer.');
+  }
+  const proposals = await listTakeProposals(engine, {
+    sourceId,
+    status,
+    allStatuses,
+    limit,
+    offset,
+    redactPrivateEvidence: false,
+  });
+  if (json) {
+    console.log(JSON.stringify(proposals, null, 2));
+    return;
+  }
+  if (proposals.length === 0) {
+    console.log(`No ${status ?? (allStatuses ? '' : 'pending ')}take proposals on ${sourceId}.`);
+    return;
+  }
+  console.log(`# Take proposals — ${sourceId}\n`);
+  for (const proposal of proposals) {
+    console.log(
+      `#${proposal.id} [${proposal.status}] ${proposal.page_slug} ` +
+      `[${proposal.kind} • ${proposal.holder} • w=${proposal.weight.toFixed(2)}]`,
+    );
+    console.log(`  ${proposal.claim_text}`);
+    console.log(
+      `  evidence=${proposal.evidence.status} model=${proposal.model_id} ` +
+      `prompt=${proposal.prompt_version} run=${proposal.proposal_run_id}`,
+    );
+  }
+}
+
+async function cmdAcceptProposal(engine: BrainEngine, args: string[]): Promise<void> {
+  const id = proposalId(args, 'accept');
+  const sourceId = await resolveTakesSourceId(engine, flagValue(args, '--source-id'));
+  const proposal = await currentProposalForPromotion(engine, id, sourceId);
+  if (proposal.status === 'accepted') {
+    console.log(`Proposal #${id} is already accepted (row #${proposal.promoted_row_num ?? '?'}).`);
+    return;
+  }
+  assertPendingProposal(proposal);
+  const reviewer = await proposalActor(engine, args);
+  const sourceDir = await resolveProposalSourceDir(engine, sourceId, flagValue(args, '--dir'));
+
+  await withPageLock(proposal.page_slug, async () => {
+    const path = pageFilePath(sourceDir, proposal.page_slug);
+    const rawBody = readBodyOrEmpty(path);
+    const parsed = parseMarkdown(rawBody, path);
+    const currentHash = takeProposalContentHash(parsed.compiled_truth);
+    if (currentHash !== proposal.content_hash) {
+      throw new Error(
+        `Proposal #${id} evidence is stale on disk; expected content hash ${proposal.content_hash.slice(0, 12)}, ` +
+        `got ${currentHash.slice(0, 12)}. Sync and generate a fresh proposal before accepting it.`,
+      );
+    }
+    const existingTakes = await engine.listTakes({
+      page_id: proposal.page_id!,
+      sourceId,
+      active: true,
+      limit: 500,
+    });
+    if (existingTakes.some(take => take.source === `proposal:${id}`)) {
+      throw new Error(`Proposal #${id} has an unrecorded canonical take row; refusing to create a duplicate.`);
+    }
+    const next = upsertTakeRow(rawBody, {
+      claim: proposal.claim_text,
+      kind: proposal.kind,
+      holder: proposal.holder,
+      weight: proposal.weight,
+      source: `proposal:${id}`,
+      active: true,
+    });
+    writeBody(path, next.body);
+    const result = await acceptTakeProposal(engine, {
+      proposal,
+      actedBy: reviewer,
+      promotedRowNum: next.rowNum,
+      takeSource: `proposal:${id}`,
+    });
+    console.log(
+      result.state === 'already_accepted'
+        ? `Proposal #${id} is already accepted (row #${result.promoted_row_num ?? next.rowNum}).`
+        : `Accepted proposal #${id} as take row #${next.rowNum} on ${proposal.page_slug}.`,
+    );
+  });
+}
+
+async function cmdRejectProposal(engine: BrainEngine, args: string[]): Promise<void> {
+  const id = proposalId(args, 'reject');
+  const sourceId = await resolveTakesSourceId(engine, flagValue(args, '--source-id'));
+  const proposal = await currentProposalForPromotion(engine, id, sourceId);
+  if (proposal.status === 'rejected') {
+    console.log(`Proposal #${id} is already rejected.`);
+    return;
+  }
+  if (proposal.status !== 'pending') {
+    throw new Error(`Proposal #${id} is already ${proposal.status}; only pending proposals can be rejected.`);
+  }
+  const reviewer = await proposalActor(engine, args);
+  const result = await rejectTakeProposal(engine, { proposalId: id, sourceId, actedBy: reviewer });
+  console.log(
+    result.state === 'already_rejected'
+      ? `Proposal #${id} is already rejected.`
+      : `Rejected proposal #${id} on ${proposal.page_slug}.`,
+  );
 }
 
 // --- Subcommands ---
@@ -561,6 +779,12 @@ Subcommands:
                                           List all active takes across the brain (#2079)
   takes search "<query>" [--limit N] [--json]
                                           Keyword search across all takes
+  takes proposals [--json] [--status pending|accepted|rejected|superseded] [--all]
+                                           Review proposals with evidence and provenance
+  takes accept <proposal-id> [--by <reviewer>] [--source-id <id>] [--dir <path>]
+                                           Promote one current proposal after human review
+  takes reject <proposal-id> [--by <reviewer>] [--source-id <id>]
+                                           Record a human rejection without promotion
   takes add <slug> --claim "..." --kind <fact|take|bet|hunch> --who <holder>
                    [--weight 0.5] [--source "..."] [--since YYYY-MM]
                                           Append a take (markdown + DB)
@@ -592,6 +816,9 @@ Common flags:
     // "No takes on list." — reading exactly like an empty takes table.
     case 'list':        return cmdList(engine, rest);
     case 'search':      return cmdSearch(engine, rest);
+    case 'proposals':   return cmdProposals(engine, rest);
+    case 'accept':      return cmdAcceptProposal(engine, rest);
+    case 'reject':      return cmdRejectProposal(engine, rest);
     case 'add':         return cmdAdd(engine, rest, await resolveTakesSourceId(engine));
     case 'update':      return cmdUpdate(engine, rest, await resolveTakesSourceId(engine));
     case 'supersede':   return cmdSupersede(engine, rest, await resolveTakesSourceId(engine));

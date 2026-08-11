@@ -148,7 +148,12 @@ export function isValidHolder(holder: string): boolean {
   return HOLDER_REGEX.test(holder);
 }
 
-const KIND_VALUES: ReadonlySet<string> = new Set(['fact', 'take', 'bet', 'hunch']);
+// Union of the fence seed kinds and the take_proposals kind enum
+// ('prediction' | 'judgment' | 'bet', see cycle/propose-takes.ts): the accept
+// path writes proposal kinds verbatim into the fence, so the parser must read
+// every kind the proposal pipeline can emit or accepted rows become
+// unparseable — and an unparseable row is DROPPED on the next fence rewrite.
+const KIND_VALUES: ReadonlySet<string> = new Set(['fact', 'take', 'bet', 'hunch', 'prediction', 'judgment']);
 const QUALITY_VALUES: ReadonlySet<string> = new Set(['correct', 'incorrect', 'partial', 'unresolvable']);
 
 // v0.30.0: header tokens that mark a v0.30-shape fence. Presence of `quality`
@@ -309,7 +314,7 @@ export function parseTakesFence(body: string): ParseResult {
 
     const kind = kindRaw.trim().toLowerCase();
     if (!KIND_VALUES.has(kind)) {
-      warnings.push(`TAKES_TABLE_MALFORMED: unknown kind "${kindRaw}" (expected fact|take|bet|hunch)`);
+      warnings.push(`TAKES_TABLE_MALFORMED: unknown kind "${kindRaw}" (expected fact|take|bet|hunch|prediction|judgment)`);
       continue;
     }
 
@@ -442,6 +447,33 @@ function formatWeight(w: number): string {
 }
 
 /**
+ * Parse the fence and refuse to proceed when it contains rows the parser
+ * DROPPED (TAKES_TABLE_MALFORMED / TAKES_ROW_NUM_COLLISION `continue`
+ * paths): any caller that re-renders the fence from the parsed subset
+ * would silently erase those rows. This guards against the 2026-08-11
+ * data-loss class, where a proposal-kind the parser didn't know made an
+ * accepted take row unparseable and the NEXT accept on the same page
+ * clobbered it. TAKES_HOLDER_INVALID and other fall-through warnings keep
+ * their rows and must not block the write.
+ */
+function parseAndAssertRewritable(
+  body: string,
+  caller: string,
+): ReturnType<typeof parseTakesFence> {
+  const parsed = parseTakesFence(body);
+  const droppingWarnings = parsed.warnings.filter(w =>
+    w.startsWith('TAKES_TABLE_MALFORMED') || w.startsWith('TAKES_ROW_NUM_COLLISION'),
+  );
+  if (droppingWarnings.length > 0 && body.indexOf(TAKES_FENCE_BEGIN) !== -1) {
+    throw new Error(
+      `${caller}: refusing to rewrite a takes fence with unparseable rows ` +
+      `(rewriting would drop them): ${droppingWarnings.join('; ')}`,
+    );
+  }
+  return parsed;
+}
+
+/**
  * Append a new take row to the body. If a fenced takes table exists, the
  * row is added to the end of it. If not, a new `## Takes` section + fence
  * is created at the end of the body.
@@ -456,10 +488,7 @@ export function upsertTakeRow(
   body: string,
   newRow: Omit<ParsedTake, 'rowNum'> & { rowNum?: number },
 ): { body: string; rowNum: number } {
-  const { takes, warnings } = parseTakesFence(body);
-  // Surface warnings to caller via an attached marker — caller decides what to do.
-  // (We don't throw here so writes proceed; doctor surfaces the underlying issue.)
-  void warnings;
+  const { takes } = parseAndAssertRewritable(body, 'upsertTakeRow');
   const nextRowNum = newRow.rowNum
     ?? (takes.length > 0 ? Math.max(...takes.map(t => t.rowNum)) + 1 : 1);
 
@@ -506,7 +535,7 @@ export function supersedeRow(
   oldRowNum: number,
   replacement: Omit<ParsedTake, 'rowNum' | 'active'>,
 ): { body: string; oldRowNum: number; newRowNum: number } {
-  const { takes } = parseTakesFence(body);
+  const { takes } = parseAndAssertRewritable(body, 'supersedeRow');
   const idx = takes.findIndex(t => t.rowNum === oldRowNum);
   if (idx === -1) {
     throw new Error(`supersedeRow: row #${oldRowNum} not found in takes fence`);

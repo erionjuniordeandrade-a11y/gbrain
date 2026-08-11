@@ -407,3 +407,79 @@ ${TAKES_FENCE_END}\n`;
     expect(oldRow.resolvedEvidence).toBe('Series A closed');
   });
 });
+
+// 2026-08-11 regression: the take_proposals accept path writes proposal
+// kinds ('prediction' | 'judgment' | 'bet') verbatim into the fence. The
+// parser must read them, and fence rewrites must never drop rows the
+// parser cannot read (the clobber that erased an accepted take).
+describe('proposal-kind vocabulary + no-clobber guard', () => {
+  const PROPOSAL_KIND_BODY = `# Page
+
+${TAKES_FENCE_BEGIN}
+| # | claim | kind | who | weight | since | source |
+|---|-------|------|-----|--------|-------|--------|
+| 1 | Feature launch will lift retention | prediction | brain | 0.5 |  | proposal:3 |
+| 2 | Fix the systemic defect once | judgment | people/alice-example | 0.85 |  | proposal:2 |
+${TAKES_FENCE_END}
+`;
+
+  test('parses prediction and judgment kinds without warnings', () => {
+    const { takes, warnings } = parseTakesFence(PROPOSAL_KIND_BODY);
+    expect(warnings).toEqual([]);
+    expect(takes).toHaveLength(2);
+    expect(takes[0].kind).toBe('prediction');
+    expect(takes[1].kind).toBe('judgment');
+  });
+
+  test('upsertTakeRow appends after an existing proposal-kind row instead of clobbering it', () => {
+    const { body, rowNum } = upsertTakeRow(PROPOSAL_KIND_BODY, {
+      claim: 'A third claim',
+      kind: 'judgment',
+      holder: 'brain',
+      weight: 0.8,
+      source: 'proposal:15',
+      active: true,
+    });
+    expect(rowNum).toBe(3);
+    const { takes, warnings } = parseTakesFence(body);
+    expect(warnings).toEqual([]);
+    expect(takes).toHaveLength(3);
+    expect(takes.map(t => t.source)).toEqual(['proposal:3', 'proposal:2', 'proposal:15']);
+  });
+
+  test('upsertTakeRow refuses to rewrite a fence containing rows the parser drops', () => {
+    const MALFORMED_BODY = `# Page
+
+${TAKES_FENCE_BEGIN}
+| # | claim | kind | who | weight | since | source |
+|---|-------|------|-----|--------|-------|--------|
+| 1 | Some claim | conjecture | claude | 0.5 |  | proposal:9 |
+${TAKES_FENCE_END}
+`;
+    expect(() => upsertTakeRow(MALFORMED_BODY, {
+      claim: 'New claim',
+      kind: 'take',
+      holder: 'brain',
+      weight: 0.5,
+      active: true,
+    })).toThrow(/refusing to rewrite a takes fence with unparseable rows/);
+  });
+
+  test('supersedeRow refuses to rewrite a fence containing rows the parser drops', () => {
+    const MALFORMED_BODY = `# Page
+
+${TAKES_FENCE_BEGIN}
+| # | claim | kind | who | weight | since | source |
+|---|-------|------|-----|--------|-------|--------|
+| 1 | Good row | take | brain | 0.5 |  | src |
+| 2 | Bad row | conjecture | claude | 0.5 |  | proposal:9 |
+${TAKES_FENCE_END}
+`;
+    expect(() => supersedeRow(MALFORMED_BODY, 1, {
+      claim: 'Replacement',
+      kind: 'take',
+      holder: 'brain',
+      weight: 0.5,
+    })).toThrow(/refusing to rewrite a takes fence with unparseable rows/);
+  });
+});

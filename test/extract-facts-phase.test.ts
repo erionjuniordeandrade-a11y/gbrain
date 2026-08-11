@@ -305,16 +305,26 @@ describe('runExtractFacts — happy path', () => {
     expect(Number(rows.rows[0].n)).toBe(0);
   });
 
-  test('walks every brain page when no slugs filter is provided', async () => {
+  test('walks every brain page when no slugs or source filter is provided', async () => {
     await putPage('people/alice', FACT_FENCE(
       `| 1 | A1 | fact | 1.0 | world | medium | 2026-01-01 |  | s |  |`,
     ));
     await putPage('companies/acme', FACT_FENCE(
       `| 1 | C1 | fact | 1.0 | world | medium | 2026-01-01 |  | s |  |`,
     ));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (engine as any).db.query(
+      `INSERT INTO sources (id, name, config) VALUES ('unscoped-other', 'unscoped-other', '{}'::jsonb)
+       ON CONFLICT (id) DO NOTHING`,
+    );
+    await engine.putPage('people/other-source', {
+      title: 'people/other-source', type: 'person',
+      compiled_truth: FACT_FENCE(`| 1 | other source fact | fact | 1.0 | world | medium | 2026-01-01 |  | s |  |`),
+      frontmatter: {}, timeline: '',
+    }, { sourceId: 'unscoped-other' });
 
     const r = await runExtractFacts(engine);  // no slugs filter
-    expect(r.pagesScanned).toBe(2);
+    expect(r.pagesScanned).toBe(3);
     expect(r.factsInserted).toBe(2);
   });
 });
@@ -672,6 +682,49 @@ describe('runExtractFacts — empty-fence guard (Codex R2-#7)', () => {
 });
 
 describe('runExtractFacts — multi-source isolation', () => {
+  test('a full source-scoped run scans only that source and leaves other sources unchanged', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (engine as any).db.query(
+      `INSERT INTO sources (id, name, config) VALUES
+         ('alpha', 'alpha', '{}'::jsonb),
+         ('beta', 'beta', '{}'::jsonb)
+       ON CONFLICT (id) DO NOTHING`,
+    );
+
+    await engine.putPage('people/alpha-only', {
+      title: 'people/alpha-only', type: 'person',
+      compiled_truth: FACT_FENCE(`| 1 | alpha fence fact | fact | 1.0 | world | high | 2026-01-01 |  | s |  |`),
+      frontmatter: {}, timeline: '',
+    }, { sourceId: 'alpha' });
+    await engine.putPage('people/beta-only', {
+      title: 'people/beta-only', type: 'person',
+      compiled_truth: FACT_FENCE(`| 1 | beta fence fact | fact | 1.0 | world | high | 2026-01-01 |  | s |  |`),
+      frontmatter: {}, timeline: '',
+    }, { sourceId: 'beta' });
+    await engine.insertFacts(
+      [{
+        fact: 'beta existing fact', kind: 'fact', source: 'seed', row_num: 1,
+        source_markdown_slug: 'people/beta-only',
+      }],
+      { source_id: 'beta' },
+    );
+
+    const result = await runExtractFacts(engine, { sourceId: 'alpha' });
+
+    expect(result.pagesScanned).toBe(1);
+    expect(result.factsInserted).toBe(1);
+    expect(result.factsDeleted).toBe(0);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rows = await (engine as any).db.query(
+      `SELECT source_id, fact FROM facts ORDER BY source_id, fact`,
+    );
+    expect(rows.rows).toEqual([
+      expect.objectContaining({ source_id: 'alpha', fact: 'alpha fence fact' }),
+      expect.objectContaining({ source_id: 'beta', fact: 'beta existing fact' }),
+    ]);
+  });
+
   test('a pending legacy row in source A does NOT jam extraction for source B (#2646 source-scope)', async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await (engine as any).db.query(

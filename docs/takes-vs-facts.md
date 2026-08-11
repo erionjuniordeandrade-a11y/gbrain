@@ -21,6 +21,32 @@ The epistemological layer. WHO believes WHAT, with confidence weight and time.
 
 **Query surface:** `gbrain takes list`, `gbrain takes search`, `gbrain think`
 
+### Proposal review is a separate step
+
+The `propose_takes` cycle writes candidates to `take_proposals`; it does not
+promote them into canonical takes. Review the queue explicitly:
+
+```bash
+gbrain takes proposals --json
+gbrain takes accept <proposal-id> --by <reviewer>
+gbrain takes reject <proposal-id> --by <reviewer>
+```
+
+The queue is source-scoped, includes the proposing model/run and current
+evidence status, and refuses promotion when the source page has changed or
+has no registered local repository. Acceptance writes the Markdown take row
+and the derived DB row together under the page lock; repeating the same
+decision is idempotent. `takes.bootstrap_enabled` remains opt-in and is not
+required for manual proposal review.
+
+External reasoning layers (e.g. a Claude operator) enter the queue through
+the `takes_proposal_create` op: the content hash is stamped server-side from
+the page's current indexed content, creation is idempotent per (page,
+content, prompt_version, claim), and nothing is promoted without the manual
+review above. Proposal kinds are `prediction | judgment | bet`; the fence
+parser reads these alongside the seed kinds, and fence rewrites refuse to
+drop rows they cannot parse.
+
 ## Facts (hot memory — `facts` table, v0.31)
 
 Personal knowledge from the brain owner's conversations. Real-time capture.

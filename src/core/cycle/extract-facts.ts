@@ -135,7 +135,7 @@ async function listExistingFactsForPage(
 }
 
 export interface ExtractFactsOpts {
-  /** Subset of slugs to reconcile. undefined = walk every page in the brain. */
+  /** Subset of slugs to reconcile. undefined = full walk in the selected source, or brain-wide when unscoped. */
   slugs?: string[];
   /** Dry-run: parse + count, no DB writes. */
   dryRun?: boolean;
@@ -318,9 +318,11 @@ export async function runExtractFacts(
     // real incremental no-op; don't escalate to full-brain walk.
     slugs = opts.slugs;
   } else {
-    // Full walk: every page in the brain. Bounded by engine.getAllSlugs
-    // which is already the precedent for full-extract paths.
-    const allSlugs = await engine.getAllSlugs();
+    // Full walk: constrain enumeration when the caller explicitly selected a
+    // source; preserve the legacy brain-wide walk when it did not.
+    const allSlugs = await engine.getAllSlugs(
+      opts.sourceId === undefined ? undefined : { sourceId },
+    );
     slugs = Array.from(allSlugs);
   }
   // v0.35.5: union the canonicals touched by the phantom-redirect pass

@@ -30,6 +30,7 @@ import { packToBudget, estimateTokens, resultTokens } from './search/token-budge
 import { isAvailable } from './ai/gateway.ts';
 import { verbOperations, MEMORY_VERBS_VERSION } from './verbs.ts';
 export { MEMORY_VERBS_VERSION };
+import { createTakeProposal, isTakeProposalStatus, listTakeProposals, TAKE_PROPOSAL_KINDS } from './take-proposals.ts';
 import type { SearchResult } from './types.ts';
 import { CJK_SLUG_CHARS, PAGE_SLUG_SEG } from './cjk.ts';
 import { ALL_SOURCES } from './source-id.ts';
@@ -2250,6 +2251,74 @@ const takes_list: Operation = {
     });
   },
   cliHints: { name: 'takes-list' },
+};
+
+const takes_proposals_list: Operation = {
+  name: 'takes_proposals_list',
+  description: 'List human-review take proposals with source, model, run, and current evidence status. Proposals are not canonical takes.',
+  scope: 'read',
+  params: {
+    status: { type: 'string', description: 'pending (default), accepted, rejected, or superseded' },
+    all_statuses: { type: 'boolean', description: 'Include all proposal statuses instead of pending only' },
+    limit: { type: 'number', description: 'Max proposals (default 100, cap 500)' },
+    offset: { type: 'number', description: 'Skip first N proposals' },
+  },
+  handler: async (ctx, p) => {
+    const rawStatus = p.status as string | undefined;
+    if (rawStatus !== undefined && !isTakeProposalStatus(rawStatus)) {
+      throw new OperationError(
+        'invalid_params',
+        `Invalid proposal status '${rawStatus}'. Expected pending, accepted, rejected, or superseded.`,
+      );
+    }
+    return listTakeProposals(ctx.engine, {
+      ...sourceScopeOpts(ctx),
+      status: rawStatus,
+      allStatuses: p.all_statuses as boolean | undefined,
+      limit: p.limit as number | undefined,
+      offset: p.offset as number | undefined,
+      takesHoldersAllowList: ctx.takesHoldersAllowList,
+      redactPrivateEvidence: ctx.remote !== false,
+    });
+  },
+  cliHints: { name: 'takes-proposals-list' },
+};
+
+const takes_proposal_create: Operation = {
+  name: 'takes_proposal_create',
+  description: 'Create one human-review take proposal against the CURRENT indexed content of a page. The content hash is stamped server-side, so fresh proposals always start with evidence=current. Writes only to the review queue — never to canonical takes or Markdown. Idempotent per (page, content, prompt_version, claim).',
+  scope: 'write',
+  params: {
+    page_slug: { type: 'string', required: true, description: 'Page the claim is grounded in (must exist in the scoped source)' },
+    claim_text: { type: 'string', required: true, description: 'The gradeable claim (10-500 chars)' },
+    kind: { type: 'string', required: true, description: `One of ${TAKE_PROPOSAL_KINDS.join(', ')}` },
+    holder: { type: 'string', required: true, description: 'Who holds the belief (e.g. a person slug, "brain", or the proposing model)' },
+    weight: { type: 'number', required: true, description: 'Confidence in (0, 1]' },
+    domain: { type: 'string', required: false, description: 'Optional domain tag (e.g. ops, marketing)' },
+    run_id: { type: 'string', required: false, description: 'Proposal run id for provenance grouping' },
+    model_id: { type: 'string', required: false, description: 'Proposing model identity (default claude-operator)' },
+  },
+  handler: async (ctx, p) => {
+    const sourceId = ctx.sourceId;
+    if (!sourceId || sourceId === ALL_SOURCES) {
+      throw new OperationError(
+        'invalid_params',
+        'takes_proposal_create requires an explicit single source (pass --source; the all-sources sentinel is rejected).',
+      );
+    }
+    return createTakeProposal(ctx.engine, {
+      sourceId,
+      pageSlug: p.page_slug as string,
+      claimText: p.claim_text as string,
+      kind: p.kind as string,
+      holder: p.holder as string,
+      weight: p.weight as number,
+      domain: p.domain as string | undefined,
+      proposalRunId: p.run_id as string | undefined,
+      modelId: p.model_id as string | undefined,
+    });
+  },
+  cliHints: { name: 'takes-proposal-create' },
 };
 
 const takes_search: Operation = {
@@ -6396,7 +6465,7 @@ export const operations: Operation[] = [
   // v0.36.1.0 (T7) — Hindsight calibration wave: read profile via MCP
   get_calibration_profile,
   // v0.28: Takes + think
-  takes_list, takes_search, think,
+  takes_list, takes_proposals_list, takes_proposal_create, takes_search, think,
   // v0.30: calibration aggregates over takes
   takes_scorecard, takes_calibration,
   // v0.28: whoami + scoped sources management
