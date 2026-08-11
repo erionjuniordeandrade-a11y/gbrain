@@ -45,10 +45,10 @@ describe('chat touchpoint — recipe registry', () => {
     }
   });
 
-  test('only Anthropic and model-family-gated OpenRouter claim supports_prompt_cache', () => {
+  test('only known cache-capable recipes claim supports_prompt_cache', () => {
     for (const r of listRecipes()) {
       if (!r.touchpoints.chat) continue;
-      if (r.id === 'anthropic') {
+      if (r.id === 'anthropic' || r.id === 'llama-server') {
         expect(r.touchpoints.chat.supports_prompt_cache).toBe(true);
       } else if (r.id === 'openrouter') {
         // Family-scoped predicate (openai/* + anthropic/claude-*), never a
