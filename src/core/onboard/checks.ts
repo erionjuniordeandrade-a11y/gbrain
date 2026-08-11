@@ -322,8 +322,8 @@ export async function checkTakesCount(
   if (takesCount >= 100) {
     message = `${takesCount} takes (calibration ready)`;
   } else if (takesCount === 0) {
-    status = 'warn';
     if (bootstrapEnabled) {
+      status = 'warn';
       message = `0 takes (bootstrap eligible — gbrain takes extract --from-pages)`;
       remediations.push(makeRemediationStep({
         id: 'onboard.takes_bootstrap',
@@ -337,6 +337,11 @@ export async function checkTakesCount(
         status: 'remediable',
       }));
     } else {
+      // Policy-aware (2026-08): takes.bootstrap_enabled is an explicit opt-in
+      // (A12 two-gate consent). 0 takes with bootstrap OFF is the expected
+      // resting state, not a fault — report ok instead of dragging the
+      // health score with a warn the operator can't act on without opting in.
+      status = 'ok';
       message = '0 takes (takes.bootstrap_enabled is false; opt in to enable)';
     }
   } else {

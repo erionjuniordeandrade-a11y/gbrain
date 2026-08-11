@@ -16,7 +16,7 @@ import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { computeRemediationPlan } from '../../src/core/remediation/index.ts';
 import { captureMetric } from '../../src/core/onboard/impact-capture.ts';
 import { buildOnboardReport, toOnboardRecommendation } from '../../src/core/onboard/render.ts';
-import { runAllOnboardChecks } from '../../src/core/onboard/checks.ts';
+import { runAllOnboardChecks, checkTakesCount } from '../../src/core/onboard/checks.ts';
 import { makeRemediationStep } from '../../src/core/remediation-step.ts';
 
 let engine: PGLiteEngine;
@@ -72,13 +72,15 @@ describe('onboard E2E — runAllOnboardChecks', () => {
     ]);
   });
 
-  test('empty brain: stale/link/timeline ok, takes_count warns (0 takes)', async () => {
+  test('empty brain: stale/link/timeline/takes_count all ok (takes.bootstrap_enabled defaults false)', async () => {
     const results = await runAllOnboardChecks(engine);
     const byName = Object.fromEntries(results.map((r) => [r.check.name, r.check.status]));
     expect(byName.embed_staleness).toBe('ok');
     expect(byName.entity_link_coverage).toBe('ok');
     expect(byName.timeline_coverage).toBe('ok');
-    expect(byName.takes_count).toBe('warn'); // 0 takes is a warn
+    // Policy-aware (2026-08): 0 takes with bootstrap opt-in OFF is the
+    // expected resting state, not a fault — ok, not warn.
+    expect(byName.takes_count).toBe('ok');
   });
 
   test('empty brain remediations: takes_count gated, pack_upgrade_available may surface', async () => {
@@ -95,6 +97,30 @@ describe('onboard E2E — runAllOnboardChecks', () => {
       .filter((r) => r.check.name === 'takes_count')
       .reduce((s, r) => s + r.remediations.length, 0);
     expect(takesRemediations).toBe(0);
+  });
+});
+
+describe('onboard E2E — checkTakesCount policy-aware (2026-08)', () => {
+  afterAll(async () => {
+    // Restore default (unset) so later describe blocks in this file see the
+    // stock config, matching the rest of this file's shared-engine tests.
+    await engine.unsetConfig('takes.bootstrap_enabled');
+  });
+
+  test('0 takes + bootstrap OFF (default) → ok, opt-in message, no remediation', async () => {
+    await engine.unsetConfig('takes.bootstrap_enabled');
+    const result = await checkTakesCount(engine);
+    expect(result.check.status).toBe('ok');
+    expect(result.check.message).toContain('takes.bootstrap_enabled is false');
+    expect(result.remediations.length).toBe(0);
+  });
+
+  test('0 takes + bootstrap ON → warn (existing behavior), with remediation', async () => {
+    await engine.setConfig('takes.bootstrap_enabled', 'true');
+    const result = await checkTakesCount(engine);
+    expect(result.check.status).toBe('warn');
+    expect(result.check.message).toContain('bootstrap eligible');
+    expect(result.remediations.length).toBe(1);
   });
 });
 

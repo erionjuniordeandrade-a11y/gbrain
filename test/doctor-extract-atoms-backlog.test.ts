@@ -4,8 +4,11 @@
  * Pins:
  *  - countExtractAtomsBacklog counts eligible-but-unextracted pages (scoped +
  *    brain-wide) and excludes pages that already have an atom (NOT EXISTS).
- *  - computeExtractAtomsBacklogCheck WARNs with a `--drain` hint when the pack
- *    doesn't run the phase and the backlog is real; OK at 0.
+ *  - computeExtractAtomsBacklogCheck is policy-aware (2026-08): OK with a
+ *    `--drain` hint when the pack doesn't run the phase (intentionally off,
+ *    regardless of backlog size — an undeclared phase must never drag the
+ *    health score); OK at 0; OK when the pack declares the phase (routine
+ *    cycle drains it).
  *
  * Real in-memory PGLite (canonical block, R3+R4). GBRAIN_HOME is pointed at an
  * empty tmpdir for the doctor-check cases so packDeclaresPhase resolves the
@@ -97,13 +100,24 @@ describe('computeExtractAtomsBacklogCheck (issue #1678)', () => {
     expect((check.details as { backlog: number }).backlog).toBe(0);
   });
 
-  it('WARNs with a --drain hint when the pack does not run the phase and backlog > 10', async () => {
+  it('is OK (policy-aware) with a --drain hint when the pack does not run the phase, even with a large backlog', async () => {
     for (let i = 0; i < 11; i++) await seedArticle(`article-${i}`);
     const check = await withEnv({ GBRAIN_HOME: EMPTY_HOME }, () =>
       computeExtractAtomsBacklogCheck(engine));
-    expect(check.status).toBe('warn');
+    expect(check.status).toBe('ok');
     expect(check.message).toContain('--drain');
+    expect(check.message).toContain('not declared by active pack');
+    expect(check.message).toContain('intentionally off');
     expect((check.details as { pack_declares_phase: boolean }).pack_declares_phase).toBe(false);
     expect((check.details as { known_approximation: string }).known_approximation).toContain('page backlog only');
+  });
+
+  it('is OK (policy-aware) with a small undeclared backlog too — no warn threshold anymore', async () => {
+    await seedArticle('article-solo');
+    const check = await withEnv({ GBRAIN_HOME: EMPTY_HOME }, () =>
+      computeExtractAtomsBacklogCheck(engine));
+    expect(check.status).toBe('ok');
+    expect((check.details as { backlog: number }).backlog).toBe(1);
+    expect((check.details as { pack_declares_phase: boolean }).pack_declares_phase).toBe(false);
   });
 });
